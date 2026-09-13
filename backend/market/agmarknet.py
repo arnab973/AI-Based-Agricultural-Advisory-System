@@ -585,7 +585,7 @@ def _call_agmarknet(
 
         response = requests.get(
             url,
-            timeout=(30, 60),
+            timeout=(15, 30),
         )
 
     except requests.exceptions.Timeout:
@@ -729,15 +729,16 @@ def get_markets(
             filters={
                 "State": state,
                 "District": district,
-            },
-            limit=1000,
-            offset=0,
-            fields=[
-                "State",
-                "District",
-                "Market",
-            ],
-        )
+    },
+    limit=100,
+    offset=0,
+    fields=[
+        "State",
+        "District",
+        "Market",
+    ],
+    sort_desc=False,
+)
 
         records = data.get(
             "records",
