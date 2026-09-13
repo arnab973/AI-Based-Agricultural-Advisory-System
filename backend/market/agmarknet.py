@@ -1,6 +1,6 @@
 import os
 import json
-import subprocess
+import requests
 from pathlib import Path
 from urllib.parse import urlencode
 from datetime import datetime
@@ -578,34 +578,30 @@ def _call_agmarknet(
     )
 
     # -----------------------------------------------------
-    # CURL
+    # REQUESTS
     # -----------------------------------------------------
 
-    result = subprocess.run(
-        [
-            "curl.exe",
-            "-L",
-            "--globoff",
-            "--connect-timeout",
-            "30",
-            "--max-time",
-            "60",
+    try:
+
+        response = requests.get(
             url,
-        ],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
-
-    if result.returncode != 0:
-
-        raise Exception(
-            "curl error: "
-            f"{result.stderr.strip()}"
+            timeout=(30, 60),
         )
 
-    if not result.stdout.strip():
+    except requests.exceptions.Timeout:
+
+        raise Exception(
+            "Agmarknet API request timed out."
+        )
+
+    except requests.exceptions.RequestException as e:
+
+        raise Exception(
+            "Agmarknet request error: "
+            f"{str(e)}"
+        )
+
+    if not response.text.strip():
 
         raise Exception(
             "Empty response received from "
@@ -618,17 +614,14 @@ def _call_agmarknet(
 
     try:
 
-        data = json.loads(
-            result.stdout
-        )
+        data = response.json()
 
-    except json.JSONDecodeError:
+    except ValueError:
 
         raise Exception(
             "Invalid Agmarknet API response:\n"
-            f"{result.stdout[:1500]}"
+            f"{response.text[:1500]}"
         )
-
     # -----------------------------------------------------
     # RATE LIMIT HANDLING
     # -----------------------------------------------------
