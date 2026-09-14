@@ -1,20 +1,28 @@
 import os
 import json
 import requests
+
 from pathlib import Path
-from urllib.parse import urlencode
 from datetime import datetime
 from typing import Optional
+from urllib.parse import urlencode
 from time import time
 
 from dotenv import load_dotenv
 
 
+# =========================================================
+# ENVIRONMENT
+# =========================================================
+
 load_dotenv()
 
 
 # =========================================================
-# CONFIG
+# OLD DATA.GOV.IN CONFIG
+# =========================================================
+# Kept because the existing commodity/price functions still
+# use the previous API flow.
 # =========================================================
 
 API_KEY = os.getenv("AGMARKNET_API_KEY")
@@ -24,14 +32,21 @@ BASE_URL = (
     "35985678-0d79-46b4-9ed6-6f13308a1d24"
 )
 
-# Project structure:
-#
-# backend/
-# ├── data/
-# │   └── india_districts.json
-# │
-# └── market/
-#     └── agmarknet.py
+
+# =========================================================
+# NEW AGMARKNET 2.0 API
+# =========================================================
+
+AGMARKNET_V2_BASE_URL = "https://api.agmarknet.gov.in/v1"
+
+AGMARKNET_FILTERS_URL = (
+    f"{AGMARKNET_V2_BASE_URL}/daily-price-arrival/filters"
+)
+
+
+# =========================================================
+# DISTRICT DATA
+# =========================================================
 
 DISTRICT_FILE = (
     Path(__file__).resolve().parent.parent
@@ -43,74 +58,42 @@ DISTRICT_FILE = (
 # =========================================================
 # CACHE
 # =========================================================
-# Prevent repeated identical requests from hitting
-# Agmarknet again and again.
-#
-# Cache lives only while FastAPI is running.
-# =========================================================
 
 _API_CACHE = {}
 
 CACHE_TTL_SECONDS = 60
 
 
-def _cache_key(
-    filters=None,
-    limit=1000,
-    offset=0,
-    fields=None,
-    sort_desc=True,
-):
-    return (
-        str(filters or {}),
-        int(limit),
-        int(offset),
-        tuple(fields or []),
-        bool(sort_desc),
-    )
+_FILTER_CACHE = None
+_FILTER_CACHE_TIMESTAMP = 0
 
-
-def _get_cached(key):
-    item = _API_CACHE.get(key)
-
-    if not item:
-        return None
-
-    timestamp, data = item
-
-    if time() - timestamp > CACHE_TTL_SECONDS:
-        _API_CACHE.pop(key, None)
-        return None
-
-    print("Using cached Agmarknet response.")
-
-    return data
-
-
-def _set_cached(key, data):
-    _API_CACHE[key] = (
-        time(),
-        data,
-    )
+FILTER_CACHE_TTL_SECONDS = 600
 
 
 # =========================================================
-# INDIA STATES + UNION TERRITORIES
+# INDIA STATES
 # =========================================================
 
 INDIA_STATES = [
+    "Andaman and Nicobar Islands",
     "Andhra Pradesh",
     "Arunachal Pradesh",
     "Assam",
     "Bihar",
+    "Chandigarh",
     "Chhattisgarh",
+    "Dadra and Nagar Haveli and Daman and Diu",
+    "Delhi",
     "Goa",
     "Gujarat",
     "Haryana",
     "Himachal Pradesh",
+    "Jammu and Kashmir",
     "Jharkhand",
     "Karnataka",
     "Kerala",
+    "Ladakh",
+    "Lakshadweep",
     "Madhya Pradesh",
     "Maharashtra",
     "Manipur",
@@ -118,6 +101,7 @@ INDIA_STATES = [
     "Mizoram",
     "Nagaland",
     "Odisha",
+    "Puducherry",
     "Punjab",
     "Rajasthan",
     "Sikkim",
@@ -127,85 +111,54 @@ INDIA_STATES = [
     "Uttar Pradesh",
     "Uttarakhand",
     "West Bengal",
-
-    # Union Territories
-    "Andaman and Nicobar Islands",
-    "Chandigarh",
-    "Dadra and Nagar Haveli and Daman and Diu",
-    "Delhi",
-    "Jammu and Kashmir",
-    "Ladakh",
-    "Lakshadweep",
-    "Puducherry",
 ]
 
 
 # =========================================================
-# HELPERS
+# BASIC HELPERS
 # =========================================================
 
 def _clean(value):
     """
-    Convert API value to clean string.
+    Convert any value to a clean string.
     """
-
     if value is None:
-        return None
+        return ""
 
-    value = str(value).strip()
-
-    if not value:
-        return None
-
-    return value
+    return str(value).strip()
 
 
 def _normalize(value):
     """
-    Case-insensitive normalized comparison.
+    Normalize text for comparison.
     """
-
-    if value is None:
-        return ""
-
     return " ".join(
-        str(value)
-        .strip()
-        .lower()
-        .split()
+        _clean(value).lower().split()
     )
 
-
-# =========================================================
-# DATE PARSER
-# =========================================================
 
 def _parse_arrival_date(value):
     """
     Parse Agmarknet arrival date.
 
-    Supported:
-        DD/MM/YYYY
-        DD-MM-YYYY
-        YYYY-MM-DD
-        DD/MM/YYYY HH:MM:SS
-        DD-MM-YYYY HH:MM:SS
-        YYYY-MM-DD HH:MM:SS
+    Supported examples:
+        31/08/2026
+        31-08-2026
+        2026-08-31
     """
 
     if not value:
         return None
 
-    value = str(value).strip()
+    value = _clean(value)
+
+    value = value.replace("\\/", "/")
 
     formats = [
         "%d/%m/%Y",
         "%d-%m-%Y",
         "%Y-%m-%d",
-
-        "%d/%m/%Y %H:%M:%S",
-        "%d-%m-%Y %H:%M:%S",
-        "%Y-%m-%d %H:%M:%S",
+        "%d/%m/%y",
     ]
 
     for fmt in formats:
@@ -220,96 +173,91 @@ def _parse_arrival_date(value):
     return None
 
 
-# =========================================================
-# PRICE CLEANER
-# =========================================================
-
 def _clean_price(value):
     """
-    Convert price string into integer/float where possible.
+    Convert price value to float when possible.
     """
 
     if value is None:
         return None
 
-    value = str(value).strip()
+    value = _clean(value)
 
     if not value:
         return None
 
+    value = value.replace(",", "")
+
     try:
-        number = float(value)
-
-        if number.is_integer():
-            return int(number)
-
-        return number
-
+        return float(value)
     except (ValueError, TypeError):
-        return value
+        return None
 
 
 def _clean_price_record(record):
     """
-    Return a cleaned copy of an API market-price record.
+    Clean price-related fields without changing the
+    original record structure too aggressively.
     """
+
+    if not isinstance(record, dict):
+        return record
 
     cleaned = dict(record)
 
-    price_fields = [
+    for key in [
         "Min_Price",
         "Max_Price",
         "Modal_Price",
-    ]
-
-    for field in price_fields:
-
-        if field in cleaned:
-
-            cleaned[field] = _clean_price(
-                cleaned[field]
+        "Min",
+        "Max",
+        "Modal",
+    ]:
+        if key in cleaned:
+            price = _clean_price(
+                cleaned.get(key)
             )
+
+            if price is not None:
+                cleaned[key] = price
 
     return cleaned
 
 
 # =========================================================
-# LOAD DISTRICT JSON
+# DISTRICT DATA
 # =========================================================
 
 def _load_district_data():
+    """
+    Load local State -> District JSON.
+    """
 
     if not DISTRICT_FILE.exists():
-
-        raise FileNotFoundError(
-            "india_districts.json not found.\n"
-            f"Expected location:\n{DISTRICT_FILE}"
+        print(
+            f"District file not found: {DISTRICT_FILE}"
         )
 
-    try:
+        return {}
 
+    try:
         with open(
             DISTRICT_FILE,
             "r",
             encoding="utf-8"
         ) as file:
-
             data = json.load(file)
 
-    except json.JSONDecodeError as e:
+        if isinstance(data, dict):
+            return data
 
-        raise Exception(
-            f"Invalid india_districts.json: {e}"
+    except Exception as error:
+        print(
+            "Unable to load district JSON:",
+            repr(error)
         )
 
-    if not isinstance(data, dict):
-
-        raise Exception(
-            "india_districts.json must contain "
-            "a JSON object."
-        )
-
-    return data
+    return {}
 
 
 # =========================================================
@@ -317,11 +265,11 @@ def _load_district_data():
 # =========================================================
 
 def get_states():
+    """
+    Return all supported Indian states/UTs.
+    """
 
-    return {
-        "count": len(INDIA_STATES),
-        "states": INDIA_STATES,
-    }
+    return INDIA_STATES
 
 
 # =========================================================
@@ -329,184 +277,658 @@ def get_states():
 # =========================================================
 
 def get_districts(state: str):
+    """
+    Return districts from local JSON.
+    """
+
+    state = _clean(state)
 
     if not state:
-        raise ValueError("State is required")
-
-    state = state.strip()
-
-    if not state:
-        raise ValueError("State is required")
+        return []
 
     data = _load_district_data()
 
-    matched_state = None
+    # Exact match first
+    if state in data:
+        districts = data[state]
 
-    for stored_state in data.keys():
+        if isinstance(districts, list):
+            return sorted(
+                [_clean(item) for item in districts if _clean(item)]
+            )
 
-        if (
-            _normalize(stored_state)
-            == _normalize(state)
-        ):
+    # Normalized match
+    normalized_state = _normalize(state)
 
-            matched_state = stored_state
-            break
+    for key, districts in data.items():
 
-    if matched_state is None:
+        if _normalize(key) == normalized_state:
 
-        return {
-            "state": state,
-            "count": 0,
-            "districts": [],
-        }
+            if isinstance(districts, list):
+                return sorted(
+                    [
+                        _clean(item)
+                        for item in districts
+                        if _clean(item)
+                    ]
+                )
 
-    raw_districts = data.get(
-        matched_state,
-        []
-    )
+    return []
 
-    if not isinstance(
-        raw_districts,
-        list
-    ):
 
-        raise Exception(
-            f"District data for '{matched_state}' "
-            "must be a list."
-        )
+# =========================================================
+# STATE NORMALIZATION
+# =========================================================
 
-    districts = []
+def _normalize_state(state: str):
+    """
+    Normalize state names for Agmarknet API.
+    """
 
-    for district in raw_districts:
+    state = _clean(state)
 
-        district = _clean(district)
+    aliases = {
+        "andaman and nicobar islands":
+            "Andaman and Nicobar",
 
-        if district:
-            districts.append(district)
+        "andaman & nicobar islands":
+            "Andaman and Nicobar",
 
-    # Remove duplicates
-    districts = list(
-        dict.fromkeys(districts)
-    )
+        "jammu & kashmir":
+            "Jammu and Kashmir",
 
-    # Sort
-    districts.sort(
-        key=lambda x: x.lower()
-    )
+        "odisha":
+            "Odisha",
 
-    return {
-        "state": matched_state,
-        "count": len(districts),
-        "districts": districts,
+        "orissa":
+            "Odisha",
+
+        "uttaranchal":
+            "Uttarakhand",
+
+        "pondicherry":
+            "Puducherry",
     }
 
+    normalized = _normalize(state)
 
-# =========================================================
-# NORMALIZE STATE
-# =========================================================
-
-def _normalize_state(state):
-
-    if not state:
-        return None
-
-    state = state.strip()
-
-    for available_state in INDIA_STATES:
-
-        if (
-            _normalize(available_state)
-            == _normalize(state)
-        ):
-
-            return available_state
-
-    return state
+    return aliases.get(
+        normalized,
+        state
+    )
 
 
 # =========================================================
-# NORMALIZE DISTRICT
+# DISTRICT NORMALIZATION
 # =========================================================
 
 def _normalize_district(
-    state,
-    district
+    state: str,
+    district: str
 ):
+    """
+    Normalize district against local district JSON.
+    """
+
+    district = _clean(district)
 
     if not district:
-        return None
+        return ""
 
-    district = district.strip()
+    districts = get_districts(state)
 
-    if not state:
-        return district
+    normalized_district = _normalize(
+        district
+    )
 
-    try:
+    for item in districts:
 
-        data = get_districts(state)
-
-        available_districts = data.get(
-            "districts",
-            []
-        )
-
-        for available_district in available_districts:
-
-            if (
-                _normalize(available_district)
-                == _normalize(district)
-            ):
-
-                return available_district
-
-    except Exception as e:
-
-        print(
-            "District normalization warning:",
-            e
-        )
+        if _normalize(item) == normalized_district:
+            return item
 
     return district
 
 
 # =========================================================
-# AGMARKNET API REQUEST
+# AGMARKNET 2.0 FILTER API
 # =========================================================
 
-def _call_agmarknet(
-    filters=None,
-    limit=1000,
-    offset=0,
-    fields=None,
-    sort_desc=True,
-):
+def _get_agmarknet_filters():
+    """
+    Fetch Agmarknet 2.0 filter data.
 
-    if not API_KEY:
+    Endpoint:
+        /v1/daily-price-arrival/filters
 
-        raise Exception(
-            "AGMARKNET_API_KEY is missing in .env"
+    This endpoint provides:
+        - states
+        - districts
+        - markets
+        - commodities
+        - varieties
+        - grades
+        etc.
+    """
+
+    global _FILTER_CACHE
+    global _FILTER_CACHE_TIMESTAMP
+
+    now = time()
+
+    # -----------------------------------------------------
+    # CACHE
+    # -----------------------------------------------------
+
+    if (
+        _FILTER_CACHE is not None
+        and now - _FILTER_CACHE_TIMESTAMP
+        < FILTER_CACHE_TTL_SECONDS
+    ):
+        return _FILTER_CACHE
+
+    # -----------------------------------------------------
+    # HEADERS
+    # -----------------------------------------------------
+
+    headers = {
+        "Accept": (
+            "application/json, "
+            "text/plain, */*"
+        ),
+        "Origin": "https://agmarknet.gov.in",
+        "Referer": "https://agmarknet.gov.in/",
+        "User-Agent": "Mozilla/5.0",
+    }
+
+    print(
+        "\n========== AGMARKNET 2.0 FILTERS =========="
+    )
+
+    try:
+
+        response = requests.get(
+            AGMARKNET_FILTERS_URL,
+            headers=headers,
+            timeout=(15, 30)
+        )
+
+        print(
+            "Agmarknet filters status:",
+            response.status_code
+        )
+
+        response.raise_for_status()
+
+        payload = response.json()
+
+    except requests.RequestException as error:
+
+        print(
+            "Agmarknet filters request failed:",
+            repr(error)
+        )
+
+        raise RuntimeError(
+            "Unable to fetch Agmarknet 2.0 filters."
+        ) from error
+
+    except ValueError as error:
+
+        print(
+            "Invalid JSON from Agmarknet:",
+            repr(error)
+        )
+
+        raise RuntimeError(
+            "Agmarknet returned invalid JSON."
+        ) from error
+
+    # -----------------------------------------------------
+    # VALIDATE RESPONSE
+    # -----------------------------------------------------
+
+    if not payload.get("status"):
+
+        raise RuntimeError(
+            payload.get(
+                "message",
+                "Agmarknet filter request failed."
+            )
+        )
+
+    data = payload.get("data")
+
+    if not isinstance(data, dict):
+
+        raise RuntimeError(
+            "Agmarknet filter response has no valid data."
         )
 
     # -----------------------------------------------------
-    # CACHE CHECK
+    # DEBUG COUNTS
     # -----------------------------------------------------
 
-    key = _cache_key(
-        filters=filters,
-        limit=limit,
-        offset=offset,
-        fields=fields,
-        sort_desc=sort_desc,
+    print(
+        "States:",
+        len(data.get("state_data") or [])
     )
 
-    cached_data = _get_cached(key)
+    print(
+        "Districts:",
+        len(data.get("district_data") or [])
+    )
 
-    if cached_data is not None:
-        return cached_data
+    print(
+        "Markets:",
+        len(data.get("market_data") or [])
+    )
+
+    print(
+        "Commodities:",
+        len(data.get("cmdt_data") or [])
+    )
 
     # -----------------------------------------------------
-    # PARAMETERS
+    # CACHE
     # -----------------------------------------------------
+
+    _FILTER_CACHE = data
+    _FILTER_CACHE_TIMESTAMP = now
+
+    return data
+
+
+# =========================================================
+# FIND STATE ID FROM AGMARKNET FILTER DATA
+# =========================================================
+
+def _find_state_id(
+    filter_data,
+    state: str
+):
+    """
+    Find Agmarknet state ID.
+    """
+
+    requested_state = _normalize_state(
+        state
+    )
+
+    normalized_requested = _normalize(
+        requested_state
+    )
+
+    state_data = (
+        filter_data.get("state_data")
+        or []
+    )
+
+    for item in state_data:
+
+        api_state = _clean(
+            item.get("state_name")
+        )
+
+        if not api_state:
+            continue
+
+        if _normalize(api_state) == normalized_requested:
+
+            return item.get("id")
+
+    # -----------------------------------------------------
+    # SPECIAL ALIAS
+    # -----------------------------------------------------
+
+    if normalized_requested == (
+        "andaman and nicobar islands"
+    ):
+
+        for item in state_data:
+
+            api_state = _normalize(
+                item.get("state_name")
+            )
+
+            if api_state == "andaman and nicobar":
+                return item.get("id")
+
+    return None
+
+
+# =========================================================
+# FIND DISTRICT ID
+# =========================================================
+
+def _find_district_id(
+    filter_data,
+    state_id,
+    state: str,
+    district: str
+):
+    """
+    Find district ID from Agmarknet filter data.
+
+    We first try district_data.
+    If its structure differs, we also check
+    the nested districts returned by /location/state.
+    """
+
+    requested_district = _normalize_district(
+        state,
+        district
+    )
+
+    normalized_requested = _normalize(
+        requested_district
+    )
+
+    district_data = (
+        filter_data.get("district_data")
+        or []
+    )
+
+    # -----------------------------------------------------
+    # DIRECT DISTRICT DATA
+    # -----------------------------------------------------
+
+    for item in district_data:
+
+        district_name = _clean(
+            item.get("district_name")
+            or item.get("name")
+        )
+
+        if not district_name:
+            continue
+
+        item_state_id = (
+            item.get("state_id")
+            or item.get("stateId")
+        )
+
+        if (
+            item_state_id is not None
+            and state_id is not None
+            and str(item_state_id)
+            != str(state_id)
+        ):
+            continue
+
+        if (
+            _normalize(district_name)
+            == normalized_requested
+        ):
+            return (
+                item.get("id")
+                or item.get("district_id")
+            )
+
+    # -----------------------------------------------------
+    # FALLBACK: NESTED STATE DATA
+    # -----------------------------------------------------
+
+    state_data = (
+        filter_data.get("state_data")
+        or []
+    )
+
+    for state_item in state_data:
+
+        if str(
+            state_item.get("id")
+        ) != str(state_id):
+
+            continue
+
+        districts = (
+            state_item.get("districts")
+            or []
+        )
+
+        for item in districts:
+
+            if isinstance(item, dict):
+
+                district_name = _clean(
+                    item.get("district_name")
+                    or item.get("name")
+                )
+
+                district_id = (
+                    item.get("id")
+                    or item.get("district_id")
+                )
+
+            else:
+
+                district_name = _clean(item)
+                district_id = None
+
+            if (
+                district_name
+                and _normalize(district_name)
+                == normalized_requested
+            ):
+
+                return district_id
+
+    return None
+
+
+# =========================================================
+# MARKETS - AGMARKNET 2.0
+# =========================================================
+
+def get_markets(
+    state: str,
+    district: str
+):
+    """
+    Get markets for a selected State + District.
+
+    Uses:
+        /v1/daily-price-arrival/filters
+
+    No india_markets.json is required.
+    """
+
+    state = _clean(state)
+    district = _clean(district)
+
+    if not state:
+        return []
+
+    if not district:
+        return []
+
+    # -----------------------------------------------------
+    # NORMALIZE
+    # -----------------------------------------------------
+
+    state = _normalize_state(
+        state
+    )
+
+    district = _normalize_district(
+        state,
+        district
+    )
+
+    print(
+        "\n========== GET MARKETS =========="
+    )
+
+    print(
+        "Requested state:",
+        state
+    )
+
+    print(
+        "Requested district:",
+        district
+    )
+
+    # -----------------------------------------------------
+    # GET FILTER DATA
+    # -----------------------------------------------------
+
+    filter_data = _get_agmarknet_filters()
+
+    # -----------------------------------------------------
+    # STATE ID
+    # -----------------------------------------------------
+
+    state_id = _find_state_id(
+        filter_data,
+        state
+    )
+
+    if state_id is None:
+
+        print(
+            "State ID not found:",
+            state
+        )
+
+        return []
+
+    print(
+        "Agmarknet state_id:",
+        state_id
+    )
+
+    # -----------------------------------------------------
+    # DISTRICT ID
+    # -----------------------------------------------------
+
+    district_id = _find_district_id(
+        filter_data,
+        state_id,
+        state,
+        district
+    )
+
+    if district_id is None:
+
+        print(
+            "District ID not found:",
+            district
+        )
+
+        return []
+
+    print(
+        "Agmarknet district_id:",
+        district_id
+    )
+
+    # -----------------------------------------------------
+    # FILTER MARKETS
+    # -----------------------------------------------------
+
+    market_data = (
+        filter_data.get("market_data")
+        or []
+    )
+
+    markets = []
+
+    for item in market_data:
+
+        if not isinstance(item, dict):
+            continue
+
+        market_name = _clean(
+            item.get("mkt_name")
+            or item.get("market_name")
+            or item.get("name")
+        )
+
+        if not market_name:
+            continue
+
+        # Ignore global "All Markets"
+        if _normalize(market_name) == "all markets":
+            continue
+
+        item_state_id = (
+            item.get("state_id")
+            or item.get("stateId")
+        )
+
+        item_district_id = (
+            item.get("district_id")
+            or item.get("districtId")
+        )
+
+        # -------------------------------------------------
+        # STATE MATCH
+        # -------------------------------------------------
+
+        if (
+            str(item_state_id)
+            != str(state_id)
+        ):
+            continue
+
+        # -------------------------------------------------
+        # DISTRICT MATCH
+        # -------------------------------------------------
+
+        if (
+            str(item_district_id)
+            != str(district_id)
+        ):
+            continue
+
+        markets.append(
+            market_name
+        )
+
+    # -----------------------------------------------------
+    # REMOVE DUPLICATES
+    # -----------------------------------------------------
+
+    markets = sorted(
+        set(markets),
+        key=lambda value: value.lower()
+    )
+
+    print(
+        "Markets found:",
+        len(markets)
+    )
+
+    # -----------------------------------------------------
+    # RETURN
+    # -----------------------------------------------------
+
+    return markets
+
+
+# =========================================================
+# OLD API REQUEST HELPER
+# =========================================================
+
+def _call_agmarknet(
+    filters: Optional[dict] = None,
+    fields: Optional[str] = None,
+    limit: int = 1000,
+    offset: int = 0,
+    sort: Optional[str] = None
+):
+    """
+    Existing data.gov.in request helper.
+
+    Kept for the existing commodity/price implementation.
+    """
+
+    if not API_KEY:
+
+        raise RuntimeError(
+            "AGMARKNET_API_KEY is not configured."
+        )
 
     params = {
         "api-key": API_KEY,
@@ -515,375 +937,112 @@ def _call_agmarknet(
         "offset": offset,
     }
 
-    # -----------------------------------------------------
-    # Filters
-    # -----------------------------------------------------
-
     if filters:
-
-        for key_name, value in filters.items():
-
-            value = _clean(value)
-
-            if not value:
-                continue
-
-            params[
-                f"filters[{key_name}]"
-            ] = value
-
-    # -----------------------------------------------------
-    # Fields
-    # -----------------------------------------------------
+        params.update(filters)
 
     if fields:
+        params["fields"] = fields
 
-        params["fields"] = ",".join(fields)
+    if sort:
+        params["sort"] = sort
 
-    # -----------------------------------------------------
-    # Latest Arrival_Date first
-    # -----------------------------------------------------
-
-    if sort_desc:
-
-        params[
-            "sort[Arrival_Date]"
-        ] = "desc"
-
-    # -----------------------------------------------------
-    # URL
-    # -----------------------------------------------------
+    query_string = urlencode(
+        params,
+        safe="[],"
+    )
 
     url = (
-        f"{BASE_URL}?"
-        f"{urlencode(params)}"
+        f"{BASE_URL}?{query_string}"
     )
 
-    print(
-        "\n========== AGMARKNET REQUEST =========="
-    )
+    cache_key = url
 
-    safe_url = url.replace(
-        API_KEY,
-        "***"
-    )
-
-    print(
-        "URL:",
-        safe_url
-    )
-
-    print(
-        "========================================"
-    )
+    now = time()
 
     # -----------------------------------------------------
-    # REQUESTS
+    # CACHE
     # -----------------------------------------------------
+
+    cached = _API_CACHE.get(
+        cache_key
+    )
+
+    if cached:
+
+        cached_time, cached_data = cached
+
+        if (
+            now - cached_time
+            < CACHE_TTL_SECONDS
+        ):
+            return cached_data
+
+    print(
+        "\n========== OLD AGMARKNET API =========="
+    )
+
+    print(
+        "Requesting data.gov.in..."
+    )
 
     try:
 
         response = requests.get(
             url,
-            timeout=(15, 30),
+            timeout=(15, 30)
         )
 
-    except requests.exceptions.Timeout:
-
-        raise Exception(
-            "Agmarknet API request timed out."
+        print(
+            "Old Agmarknet status:",
+            response.status_code
         )
 
-    except requests.exceptions.RequestException as e:
-
-        raise Exception(
-            "Agmarknet request error: "
-            f"{str(e)}"
-        )
-
-    if not response.text.strip():
-
-        raise Exception(
-            "Empty response received from "
-            "Agmarknet API"
-        )
-
-    # -----------------------------------------------------
-    # JSON
-    # -----------------------------------------------------
-
-    try:
+        response.raise_for_status()
 
         data = response.json()
 
-    except ValueError:
-
-        raise Exception(
-            "Invalid Agmarknet API response:\n"
-            f"{response.text[:1500]}"
-        )
-    # -----------------------------------------------------
-    # RATE LIMIT HANDLING
-    # -----------------------------------------------------
-
-    error_text = str(
-        data.get("error", "")
-    ).lower()
-
-    if (
-        "rate limit" in error_text
-        or "rate_limit" in error_text
-        or "too many requests" in error_text
-        or data.get("status") == 429
-    ):
+    except requests.RequestException as error:
 
         print(
-            "\n⚠️ AGMARKNET RATE LIMIT EXCEEDED"
+            "Agmarknet API request failed:",
+            repr(error)
         )
 
-        # Return a structured empty response instead
-        # of crashing the complete application.
-        return {
-            "status": "rate_limited",
-            "count": 0,
-            "records": [],
-            "rate_limited": True,
-            "message": (
-                "Agmarknet API rate limit exceeded. "
-                "Please try again later."
-            ),
-        }
+        raise RuntimeError(
+            "Unable to fetch market data."
+        ) from error
+
+    except ValueError as error:
+
+        print(
+            "Invalid JSON from Agmarknet:",
+            repr(error)
+        )
+
+        raise RuntimeError(
+            "Agmarknet returned invalid JSON."
+        ) from error
 
     # -----------------------------------------------------
-    # NORMAL STATUS ERROR
+    # VALIDATE
     # -----------------------------------------------------
 
-    if data.get("status") != "ok":
+    if not isinstance(data, dict):
 
-        raise Exception(
-            "Agmarknet API returned error:\n"
-            f"{data}"
+        raise RuntimeError(
+            "Invalid Agmarknet response."
         )
 
     # -----------------------------------------------------
-    # CACHE SUCCESSFUL RESPONSE
+    # CACHE
     # -----------------------------------------------------
 
-    _set_cached(
-        key,
+    _API_CACHE[cache_key] = (
+        now,
         data
     )
 
     return data
-
-
-# =========================================================
-# MARKETS
-# =========================================================
-
-def get_markets(
-    state: str,
-    district: str
-):
-
-    if not state:
-        raise ValueError("State is required")
-
-    if not district:
-        raise ValueError("District is required")
-
-    state = _normalize_state(state)
-
-    district = _normalize_district(
-        state,
-        district
-    )
-
-    print(
-        "\n========== MARKET API =========="
-    )
-
-    print(
-        "State:",
-        state
-    )
-
-    print(
-        "District:",
-        district
-    )
-
-    print(
-        "================================"
-    )
-
-    markets = set()
-
-    # -----------------------------------------------------
-    # DIRECT SEARCH
-    # -----------------------------------------------------
-
-    try:
-
-        data = _call_agmarknet(
-            filters={
-                "State": state,
-                "District": district,
-    },
-    limit=100,
-    offset=0,
-    fields=[
-        "State",
-        "District",
-        "Market",
-    ],
-    sort_desc=False,
-)
-
-        records = data.get(
-            "records",
-            []
-        )
-
-        print(
-            "Direct district records:",
-            len(records)
-        )
-
-        for record in records:
-
-            market = _clean(
-                record.get("Market")
-            )
-
-            if market:
-                markets.add(market)
-
-    except Exception as e:
-
-        print(
-            "Direct district search failed:",
-            e
-        )
-
-    # -----------------------------------------------------
-    # FALLBACK
-    # -----------------------------------------------------
-
-    if not markets:
-
-        print(
-            "No direct markets found."
-        )
-
-        print(
-            "Trying state-level fallback..."
-        )
-
-        offset = 0
-        page_size = 1000
-
-        target_district = _normalize(
-            district
-        )
-
-        # Keep fallback limited.
-        # Do not make 20 expensive API calls.
-        for page in range(3):
-
-            try:
-
-                data = _call_agmarknet(
-                    filters={
-                        "State": state,
-                    },
-                    limit=page_size,
-                    offset=offset,
-                    fields=[
-                        "State",
-                        "District",
-                        "Market",
-                    ],
-                )
-
-            except Exception as e:
-
-                print(
-                    "Fallback request failed:",
-                    e
-                )
-
-                break
-
-            # Stop immediately if API is rate limited.
-            if data.get("rate_limited"):
-
-                print(
-                    "Market fallback stopped "
-                    "because API is rate limited."
-                )
-
-                break
-
-            records = data.get(
-                "records",
-                []
-            )
-
-            if not records:
-                break
-
-            for record in records:
-
-                api_district = _clean(
-                    record.get("District")
-                )
-
-                if not api_district:
-                    continue
-
-                if (
-                    _normalize(api_district)
-                    != target_district
-                ):
-                    continue
-
-                market = _clean(
-                    record.get("Market")
-                )
-
-                if market:
-                    markets.add(market)
-
-            if len(records) < page_size:
-                break
-
-            offset += page_size
-
-    # -----------------------------------------------------
-    # RESULT
-    # -----------------------------------------------------
-
-    result = sorted(
-        markets,
-        key=lambda x: x.lower()
-    )
-
-    print(
-        "Final Markets Found:",
-        len(result)
-    )
-
-    print(
-        "================================\n"
-    )
-
-    return {
-        "state": state,
-        "district": district,
-        "count": len(result),
-        "markets": result,
-    }
 
 
 # =========================================================
@@ -893,82 +1052,45 @@ def get_markets(
 def get_commodities(
     state: Optional[str] = None,
     district: Optional[str] = None,
-    market: Optional[str] = None,
+    market: Optional[str] = None
 ):
+    """
+    Existing commodity lookup.
 
-    state = _normalize_state(state)
+    Kept compatible with the current frontend/backend.
+    """
 
-    district = _normalize_district(
-        state,
-        district
-    )
+    filters = {}
+
+    if state:
+        filters["filters[State]"] = state
+
+    if district:
+        filters["filters[District]"] = district
 
     if market:
-        market = market.strip()
+        filters["filters[Market]"] = market
 
-    print(
-        "\n========== COMMODITY API =========="
+    fields = (
+        "State,District,Market,"
+        "Commodity,Commodity_Code"
     )
-
-    print(
-        "Requested State:",
-        state
-    )
-
-    print(
-        "Requested District:",
-        district
-    )
-
-    print(
-        "Requested Market:",
-        market
-    )
-
-    print(
-        "==================================="
-    )
-
-    commodities = set()
-
-    # =====================================================
-    # EXACT SEARCH
-    # =====================================================
 
     try:
 
-        filters = {}
-
-        if state:
-            filters["State"] = state
-
-        if district:
-            filters["District"] = district
-
-        if market:
-            filters["Market"] = market
-
         data = _call_agmarknet(
             filters=filters,
+            fields=fields,
             limit=1000,
-            offset=0,
-            fields=[
-                "State",
-                "District",
-                "Market",
-                "Commodity",
-            ],
+            offset=0
         )
 
-        records = data.get(
-            "records",
-            []
+        records = (
+            data.get("records")
+            or []
         )
 
-        print(
-            "Exact search records:",
-            len(records)
-        )
+        commodities = []
 
         for record in records:
 
@@ -977,580 +1099,119 @@ def get_commodities(
             )
 
             if commodity:
-                commodities.add(
+                commodities.append(
                     commodity
                 )
 
-    except Exception as e:
+        commodities = sorted(
+            set(commodities),
+            key=lambda value: value.lower()
+        )
+
+        return commodities
+
+    except Exception as error:
 
         print(
-            "Exact commodity search failed:",
-            e
+            "Commodity lookup failed:",
+            repr(error)
         )
 
-    # =====================================================
-    # FALLBACK
-    # =====================================================
-
-    if not commodities:
-
-        print(
-            "No commodities found using exact filter."
-        )
-
-        print(
-            "Trying fallback..."
-        )
-
-        offset = 0
-        page_size = 1000
-
-        target_market = (
-            _normalize(market)
-            if market
-            else None
-        )
-
-        # Limited fallback to protect API quota.
-        for page in range(3):
-
-            try:
-
-                filters = {}
-
-                if state:
-                    filters["State"] = state
-
-                if district:
-                    filters["District"] = district
-
-                data = _call_agmarknet(
-                    filters=filters,
-                    limit=page_size,
-                    offset=offset,
-                    fields=[
-                        "State",
-                        "District",
-                        "Market",
-                        "Commodity",
-                    ],
-                )
-
-            except Exception as e:
-
-                print(
-                    "Fallback API request failed:",
-                    e
-                )
-
-                break
-
-            if data.get("rate_limited"):
-
-                print(
-                    "Commodity fallback stopped "
-                    "because API is rate limited."
-                )
-
-                break
-
-            records = data.get(
-                "records",
-                []
-            )
-
-            print(
-                f"Fallback page {page + 1}:",
-                len(records),
-                "records"
-            )
-
-            if not records:
-                break
-
-            for record in records:
-
-                api_market = _clean(
-                    record.get("Market")
-                )
-
-                if not api_market:
-                    continue
-
-                if target_market:
-
-                    if (
-                        _normalize(api_market)
-                        != target_market
-                    ):
-                        continue
-
-                commodity = _clean(
-                    record.get("Commodity")
-                )
-
-                if commodity:
-                    commodities.add(
-                        commodity
-                    )
-
-            if len(records) < page_size:
-                break
-
-            offset += page_size
-
-    # =====================================================
-    # RESULT
-    # =====================================================
-
-    result = sorted(
-        commodities,
-        key=lambda x: x.lower()
-    )
-
-    print(
-        "Final Commodities Found:",
-        len(result)
-    )
-
-    print(
-        "===================================\n"
-    )
-
-    return {
-        "state": state,
-        "district": district,
-        "market": market,
-        "count": len(result),
-        "commodities": result,
-    }
+        return []
 
 
 # =========================================================
-# GET MARKET PRICE RECORDS
+# MARKET PRICE
 # =========================================================
 
 def get_market_prices(
     state: str,
     commodity: str,
     district: Optional[str] = None,
-    market: Optional[str] = None,
+    market: Optional[str] = None
 ):
     """
-    Fetch market price records from Agmarknet.
+    Existing market-price function.
 
-    Flow:
-
-        State
-          ↓
-        District
-          ↓
-        Market
-          ↓
-        Commodity
-          ↓
-        Latest Market Price
-
-    IMPORTANT:
-    Only the first sorted page is requested.
-    This avoids unnecessary API calls and rate limits.
+    Uses the current data.gov.in implementation so the
+    existing /market/price endpoint remains compatible.
     """
 
-    # =====================================================
-    # VALIDATION
-    # =====================================================
+    filters = {}
 
-    if not state or not state.strip():
+    if state:
+        filters["filters[State]"] = state
 
-        raise ValueError(
-            "State is required"
-        )
-
-    if not commodity or not commodity.strip():
-
-        raise ValueError(
-            "Commodity is required"
-        )
-
-    state = _normalize_state(state)
-
-    commodity = commodity.strip()
-
-    district = _normalize_district(
-        state,
-        district
-    )
-
-    if market:
-        market = market.strip()
-
-    print(
-        "\n========== MARKET PRICE API =========="
-    )
-
-    print(
-        "State:",
-        state
-    )
-
-    print(
-        "District:",
-        district
-    )
-
-    print(
-        "Market:",
-        market
-    )
-
-    print(
-        "Commodity:",
-        commodity
-    )
-
-    print(
-        "======================================"
-    )
-
-    # =====================================================
-    # API FILTERS
-    # =====================================================
-
-    filters = {
-        "State": state,
-        "Commodity": commodity,
-    }
+    if commodity:
+        filters["filters[Commodity]"] = commodity
 
     if district:
-        filters["District"] = district
+        filters["filters[District]"] = district
 
     if market:
-        filters["Market"] = market
+        filters["filters[Market]"] = market
 
-    # =====================================================
-    # FETCH ONLY FIRST PAGE
-    # =====================================================
-    #
-    # We already sort by Arrival_Date descending.
-    #
-    # Therefore the newest records are on page 1.
-    #
-    # No 50,000-record pagination is required.
-    # =====================================================
-
-    data = _call_agmarknet(
-        filters=filters,
-        limit=1000,
-        offset=0,
-        fields=[
-            "State",
-            "District",
-            "Market",
-            "Commodity",
-            "Variety",
-            "Grade",
-            "Arrival_Date",
-            "Min_Price",
-            "Max_Price",
-            "Modal_Price",
-            "Commodity_Code",
-        ],
-        sort_desc=True,
+    fields = (
+        "State,"
+        "District,"
+        "Market,"
+        "Commodity,"
+        "Variety,"
+        "Grade,"
+        "Arrival_Date,"
+        "Min_Price,"
+        "Max_Price,"
+        "Modal_Price,"
+        "Commodity_Code"
     )
 
-    # =====================================================
-    # RATE LIMIT
-    # =====================================================
+    try:
 
-    if data.get("rate_limited"):
-
-        print(
-            "Market price request was rate limited."
+        data = _call_agmarknet(
+            filters=filters,
+            fields=fields,
+            limit=1000,
+            offset=0,
+            sort="Arrival_Date:desc"
         )
 
-        return {
-            "success": False,
-            "rate_limited": True,
-            "count": 0,
-
-            "state": state,
-            "district": district,
-            "market": market,
-            "commodity": commodity,
-
-            "latest": None,
-            "records": [],
-
-            "message": (
-                "Live market price is temporarily "
-                "unavailable because the Agmarknet "
-                "API rate limit has been reached."
-            ),
-        }
-
-    # =====================================================
-    # RECORDS
-    # =====================================================
-
-    records = data.get(
-        "records",
-        []
-    )
-
-    print(
-        "Initial price records:",
-        len(records)
-    )
-
-    # =====================================================
-    # LOCAL EXACT FILTERING
-    # =====================================================
-
-    filtered_records = []
-
-    target_state = _normalize(state)
-
-    target_commodity = _normalize(
-        commodity
-    )
-
-    target_district = (
-        _normalize(district)
-        if district
-        else None
-    )
-
-    target_market = (
-        _normalize(market)
-        if market
-        else None
-    )
-
-    for record in records:
-
-        api_state = _normalize(
-            record.get("State")
+        records = (
+            data.get("records")
+            or []
         )
 
-        api_commodity = _normalize(
-            record.get("Commodity")
-        )
+        cleaned_records = []
 
-        api_district = _normalize(
-            record.get("District")
-        )
+        for record in records:
 
-        api_market = _normalize(
-            record.get("Market")
-        )
+            if not isinstance(
+                record,
+                dict
+            ):
+                continue
 
-        # -------------------------------------------------
-        # State
-        # -------------------------------------------------
-
-        if (
-            target_state
-            and api_state
-            and api_state != target_state
-        ):
-            continue
-
-        # -------------------------------------------------
-        # Commodity
-        # -------------------------------------------------
-
-        if (
-            target_commodity
-            and api_commodity
-            and api_commodity != target_commodity
-        ):
-            continue
-
-        # -------------------------------------------------
-        # District
-        # -------------------------------------------------
-
-        if (
-            target_district
-            and api_district
-            and api_district != target_district
-        ):
-            continue
-
-        # -------------------------------------------------
-        # Market
-        # -------------------------------------------------
-
-        if (
-            target_market
-            and api_market
-            and api_market != target_market
-        ):
-            continue
-
-        filtered_records.append(
-            record
-        )
-
-    print(
-        "Records after local filtering:",
-        len(filtered_records)
-    )
-
-    # =====================================================
-    # DATE SORTING
-    # =====================================================
-
-    dated_records = []
-
-    invalid_date_records = []
-
-    for index, record in enumerate(
-        filtered_records
-    ):
-
-        arrival_date = record.get(
-            "Arrival_Date"
-        )
-
-        parsed_date = _parse_arrival_date(
-            arrival_date
-        )
-
-        if parsed_date:
-
-            dated_records.append(
-                (
-                    parsed_date,
-                    index,
-                    record,
+            cleaned_records.append(
+                _clean_price_record(
+                    record
                 )
             )
 
-        else:
+        return {
+            "count": len(cleaned_records),
+            "records": cleaned_records,
+        }
 
-            invalid_date_records.append(
-                record
-            )
-
-    # =====================================================
-    # NEWEST FIRST
-    # =====================================================
-
-    dated_records.sort(
-        key=lambda item: (
-            item[0],
-            -item[1],
-        ),
-        reverse=True,
-    )
-
-    # =====================================================
-    # CLEAN RECORDS
-    # =====================================================
-
-    cleaned_records = []
-
-    for _, _, record in dated_records:
-
-        cleaned_records.append(
-            _clean_price_record(
-                record
-            )
-        )
-
-    # =====================================================
-    # LATEST RECORD
-    # =====================================================
-
-    latest = None
-
-    if cleaned_records:
-
-        latest = cleaned_records[0]
-
-    # =====================================================
-    # DEBUG
-    # =====================================================
-
-    print(
-        "\n========== LATEST MARKET PRICE =========="
-    )
-
-    if latest:
+    except Exception as error:
 
         print(
-            "Latest Date:",
-            latest.get("Arrival_Date")
+            "Market price lookup failed:",
+            repr(error)
         )
 
-        print(
-            "Commodity:",
-            latest.get("Commodity")
-        )
-
-        print(
-            "District:",
-            latest.get("District")
-        )
-
-        print(
-            "Market:",
-            latest.get("Market")
-        )
-
-        print(
-            "Variety:",
-            latest.get("Variety")
-        )
-
-        print(
-            "Min Price:",
-            latest.get("Min_Price")
-        )
-
-        print(
-            "Max Price:",
-            latest.get("Max_Price")
-        )
-
-        print(
-            "Modal Price:",
-            latest.get("Modal_Price")
-        )
-
-    else:
-
-        print(
-            "NO VALID MARKET PRICE FOUND"
-        )
-
-    print(
-        "=========================================\n"
-    )
-
-    # =====================================================
-    # FINAL RESPONSE
-    # =====================================================
-
-    return {
-        "success": True,
-
-        "count": len(cleaned_records),
-
-        "state": state,
-        "district": district,
-        "market": market,
-        "commodity": commodity,
-
-        "latest": latest,
-
-        "records": cleaned_records,
-
-        "invalid_date_records": len(
-            invalid_date_records
-        ),
-    }
+        return {
+            "count": 0,
+            "records": [],
+        }
 
 
 # =========================================================
@@ -1561,128 +1222,77 @@ def fetch_market_price(
     state: str,
     commodity: str,
     district: Optional[str] = None,
-    market: Optional[str] = None,
+    market: Optional[str] = None
 ):
     """
-    Main public function for market price.
+    Return market price data with latest record.
     """
-
-    # =====================================================
-    # VALIDATION
-    # =====================================================
-
-    if not state or not state.strip():
-
-        raise ValueError(
-            "State is required"
-        )
-
-    if not commodity or not commodity.strip():
-
-        raise ValueError(
-            "Commodity is required"
-        )
-
-    state = state.strip()
-
-    commodity = commodity.strip()
-
-    if district:
-        district = district.strip()
-
-    if market:
-        market = market.strip()
-
-    # =====================================================
-    # FETCH
-    # =====================================================
 
     data = get_market_prices(
         state=state,
         commodity=commodity,
         district=district,
-        market=market,
+        market=market
     )
 
-    # =====================================================
-    # RATE LIMIT
-    # =====================================================
-
-    if data.get("rate_limited"):
-
-        return {
-            "success": False,
-
-            "rate_limited": True,
-
-            "count": 0,
-
-            "state": state,
-            "district": district,
-            "market": market,
-            "commodity": commodity,
-
-            "latest": None,
-
-            "records": [],
-
-            "message": data.get(
-                "message",
-                "Market API rate limit exceeded."
-            ),
-        }
-
-    records = data.get(
-        "records",
-        []
+    records = (
+        data.get("records")
+        or []
     )
-
-    latest = data.get(
-        "latest"
-    )
-
-    # =====================================================
-    # NO DATA
-    # =====================================================
 
     if not records:
 
         return {
-            "success": True,
-
             "count": 0,
-
-            "state": state,
-            "district": district,
-            "market": market,
-            "commodity": commodity,
-
             "latest": None,
-
             "records": [],
-
-            "message": (
-                "No market price data found "
-                "for the selected location "
-                "and commodity."
-            ),
         }
 
-    # =====================================================
-    # FINAL RESPONSE
-    # =====================================================
+    valid_records = []
+
+    for record in records:
+
+        arrival_date = record.get(
+            "Arrival_Date"
+        )
+
+        parsed_date = (
+            _parse_arrival_date(
+                arrival_date
+            )
+        )
+
+        if parsed_date is None:
+            continue
+
+        valid_records.append(
+            (
+                parsed_date,
+                record
+            )
+        )
+
+    # -----------------------------------------------------
+    # SORT NEWEST FIRST
+    # -----------------------------------------------------
+
+    valid_records.sort(
+        key=lambda item: item[0],
+        reverse=True
+    )
+
+    latest = (
+        valid_records[0][1]
+        if valid_records
+        else records[0]
+    )
 
     return {
-        "success": True,
-
         "count": len(records),
-
-        "state": state,
-        "district": district,
-        "market": market,
-        "commodity": commodity,
-
         "latest": latest,
-
-        "records": records,
+        "records": [
+            record
+            for _, record
+            in valid_records
+        ],
     }

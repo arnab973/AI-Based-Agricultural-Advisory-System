@@ -12,8 +12,7 @@ import {
 import Background3D from "../../components/Background3D";
 import { useFlashMessage } from "@/context/FlashMessageContext";
 
-const API_URL = "http://127.0.0.1:8001";
-
+const API_URL = process.env.NEXT_PUBLIC_API_URL!;
 export default function LoginPage() {
   const router = useRouter();
   const { showMessage } = useFlashMessage();
