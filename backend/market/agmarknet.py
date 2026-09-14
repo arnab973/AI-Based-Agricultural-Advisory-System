@@ -43,6 +43,10 @@ AGMARKNET_FILTERS_URL = (
     f"{AGMARKNET_V2_BASE_URL}/daily-price-arrival/filters"
 )
 
+AGMARKNET_LOCATION_STATE_URL = (
+    f"{AGMARKNET_V2_BASE_URL}/location/state"
+)
+
 
 # =========================================================
 # DISTRICT DATA
@@ -548,15 +552,111 @@ def _find_state_id(
 ):
     """
     Find Agmarknet state ID.
+
+    Agmarknet 2.0's /daily-price-arrival/filters response can contain
+    state_data, but the deployed API has shown that this list may not
+    contain the same state names as the location API.
+
+    Therefore we use the official /v1/location/state endpoint first and
+    keep the old filter-data lookup as a fallback.
     """
 
-    requested_state = _normalize_state(
-        state
-    )
+    requested_state = _normalize_state(state)
+    normalized_requested = _normalize(requested_state)
 
-    normalized_requested = _normalize(
-        requested_state
-    )
+    headers = {
+        "Accept": "application/json, text/plain, */*",
+        "Origin": "https://agmarknet.gov.in",
+        "Referer": "https://agmarknet.gov.in/",
+        "User-Agent": "Mozilla/5.0",
+    }
+
+    # -----------------------------------------------------
+    # OFFICIAL LOCATION API
+    # -----------------------------------------------------
+
+    print("Looking for Agmarknet state:", requested_state)
+
+    try:
+        response = requests.get(
+            AGMARKNET_LOCATION_STATE_URL,
+            params={"page": 1},
+            headers=headers,
+            timeout=(15, 30)
+        )
+
+        print(
+            "Agmarknet location/state status:",
+            response.status_code
+        )
+
+        response.raise_for_status()
+        payload = response.json()
+        states = payload.get("states") or []
+
+        print(
+            "Location states found:",
+            len(states)
+        )
+
+        for item in states:
+            if not isinstance(item, dict):
+                continue
+
+            api_state = _clean(
+                item.get("state_name")
+                or item.get("name")
+            )
+
+            state_id = (
+                item.get("id")
+                or item.get("state_id")
+            )
+
+            if not api_state or state_id is None:
+                continue
+
+            if _normalize(api_state) == normalized_requested:
+                print(
+                    "State matched:",
+                    api_state,
+                    "-> ID",
+                    state_id
+                )
+                return state_id
+
+            # Common Agmarknet naming variation.
+            if (
+                normalized_requested == "andaman and nicobar islands"
+                and _normalize(api_state) == "andaman and nicobar"
+            ):
+                print(
+                    "State matched:",
+                    api_state,
+                    "-> ID",
+                    state_id
+                )
+                return state_id
+
+    except requests.RequestException as error:
+        print(
+            "Agmarknet state location lookup failed:",
+            repr(error)
+        )
+    except ValueError as error:
+        print(
+            "Invalid JSON from Agmarknet state location API:",
+            repr(error)
+        )
+    except Exception as error:
+        print(
+            "Agmarknet state lookup error:",
+            repr(error)
+        )
+
+    # -----------------------------------------------------
+    # FALLBACK: FILTER DATA
+    # -----------------------------------------------------
 
     state_data = (
         filter_data.get("state_data")
@@ -564,34 +664,46 @@ def _find_state_id(
     )
 
     for item in state_data:
+        if not isinstance(item, dict):
+            continue
 
         api_state = _clean(
             item.get("state_name")
+            or item.get("name")
         )
 
         if not api_state:
             continue
 
         if _normalize(api_state) == normalized_requested:
-
-            return item.get("id")
-
-    # -----------------------------------------------------
-    # SPECIAL ALIAS
-    # -----------------------------------------------------
-
-    if normalized_requested == (
-        "andaman and nicobar islands"
-    ):
-
-        for item in state_data:
-
-            api_state = _normalize(
-                item.get("state_name")
+            state_id = (
+                item.get("id")
+                or item.get("state_id")
             )
 
-            if api_state == "andaman and nicobar":
-                return item.get("id")
+            print(
+                "State matched from filter data:",
+                api_state,
+                "-> ID",
+                state_id
+            )
+            return state_id
+
+        if (
+            normalized_requested == "andaman and nicobar islands"
+            and _normalize(api_state) == "andaman and nicobar"
+        ):
+            state_id = (
+                item.get("id")
+                or item.get("state_id")
+            )
+
+            return state_id
+
+    print(
+        "State ID not found:",
+        requested_state
+    )
 
     return None
 
@@ -607,11 +719,11 @@ def _find_district_id(
     district: str
 ):
     """
-    Find district ID from Agmarknet filter data.
+    Find district ID for the selected Agmarknet state.
 
-    We first try district_data.
-    If its structure differs, we also check
-    the nested districts returned by /location/state.
+    The official /v1/location/state endpoint returns states together
+    with their districts, so use that source first. The existing
+    filter-data lookup remains as a fallback.
     """
 
     requested_district = _normalize_district(
@@ -623,16 +735,127 @@ def _find_district_id(
         requested_district
     )
 
+    headers = {
+        "Accept": "application/json, text/plain, */*",
+        "Origin": "https://agmarknet.gov.in",
+        "Referer": "https://agmarknet.gov.in/",
+        "User-Agent": "Mozilla/5.0",
+    }
+
+    print(
+        "Looking for district:",
+        requested_district,
+        "in state ID:",
+        state_id
+    )
+
+    # -----------------------------------------------------
+    # OFFICIAL LOCATION API
+    # -----------------------------------------------------
+
+    try:
+        response = requests.get(
+            AGMARKNET_LOCATION_STATE_URL,
+            params={"page": 1},
+            headers=headers,
+            timeout=(15, 30)
+        )
+
+        print(
+            "Agmarknet location/state status:",
+            response.status_code
+        )
+
+        response.raise_for_status()
+        payload = response.json()
+        states = payload.get("states") or []
+
+        for state_item in states:
+            if not isinstance(state_item, dict):
+                continue
+
+            current_state_id = (
+                state_item.get("id")
+                or state_item.get("state_id")
+            )
+
+            if (
+                current_state_id is None
+                or str(current_state_id) != str(state_id)
+            ):
+                continue
+
+            districts = (
+                state_item.get("districts")
+                or []
+            )
+
+            print(
+                "Districts found for state:",
+                len(districts)
+            )
+
+            for item in districts:
+                if isinstance(item, dict):
+                    district_name = _clean(
+                        item.get("district_name")
+                        or item.get("name")
+                    )
+
+                    district_id = (
+                        item.get("id")
+                        or item.get("district_id")
+                    )
+                else:
+                    district_name = _clean(item)
+                    district_id = None
+
+                if not district_name or district_id is None:
+                    continue
+
+                if _normalize(district_name) == normalized_requested:
+                    print(
+                        "District matched:",
+                        district_name,
+                        "-> ID",
+                        district_id
+                    )
+                    return district_id
+
+            print(
+                "District not found in location API:",
+                requested_district
+            )
+            break
+
+    except requests.RequestException as error:
+        print(
+            "Agmarknet district location lookup failed:",
+            repr(error)
+        )
+    except ValueError as error:
+        print(
+            "Invalid JSON from Agmarknet district location API:",
+            repr(error)
+        )
+    except Exception as error:
+        print(
+            "Agmarknet district lookup error:",
+            repr(error)
+        )
+
+    # -----------------------------------------------------
+    # FALLBACK: FILTER DATA
+    # -----------------------------------------------------
+
     district_data = (
         filter_data.get("district_data")
         or []
     )
 
-    # -----------------------------------------------------
-    # DIRECT DISTRICT DATA
-    # -----------------------------------------------------
-
     for item in district_data:
+        if not isinstance(item, dict):
+            continue
 
         district_name = _clean(
             item.get("district_name")
@@ -650,22 +873,27 @@ def _find_district_id(
         if (
             item_state_id is not None
             and state_id is not None
-            and str(item_state_id)
-            != str(state_id)
+            and str(item_state_id) != str(state_id)
         ):
             continue
 
-        if (
-            _normalize(district_name)
-            == normalized_requested
-        ):
-            return (
+        if _normalize(district_name) == normalized_requested:
+            district_id = (
                 item.get("id")
                 or item.get("district_id")
             )
 
+            if district_id is not None:
+                print(
+                    "District matched from filter data:",
+                    district_name,
+                    "-> ID",
+                    district_id
+                )
+                return district_id
+
     # -----------------------------------------------------
-    # FALLBACK: NESTED STATE DATA
+    # FALLBACK: NESTED FILTER STATE DATA
     # -----------------------------------------------------
 
     state_data = (
@@ -674,11 +902,18 @@ def _find_district_id(
     )
 
     for state_item in state_data:
+        if not isinstance(state_item, dict):
+            continue
 
-        if str(
+        current_state_id = (
             state_item.get("id")
-        ) != str(state_id):
+            or state_item.get("state_id")
+        )
 
+        if (
+            current_state_id is None
+            or str(current_state_id) != str(state_id)
+        ):
             continue
 
         districts = (
@@ -687,9 +922,7 @@ def _find_district_id(
         )
 
         for item in districts:
-
             if isinstance(item, dict):
-
                 district_name = _clean(
                     item.get("district_name")
                     or item.get("name")
@@ -699,19 +932,21 @@ def _find_district_id(
                     item.get("id")
                     or item.get("district_id")
                 )
-
             else:
-
                 district_name = _clean(item)
                 district_id = None
 
             if (
                 district_name
-                and _normalize(district_name)
-                == normalized_requested
+                and district_id is not None
+                and _normalize(district_name) == normalized_requested
             ):
-
                 return district_id
+
+    print(
+        "District ID not found:",
+        requested_district
+    )
 
     return None
 
