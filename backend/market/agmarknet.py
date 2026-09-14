@@ -148,7 +148,10 @@ def _parse_arrival_date(value):
     Supported examples:
         31/08/2026
         31-08-2026
+        31-Aug-2026
+        31-August-2026
         2026-08-31
+        31/08/26
     """
 
     if not value:
@@ -161,6 +164,8 @@ def _parse_arrival_date(value):
     formats = [
         "%d/%m/%Y",
         "%d-%m-%Y",
+        "%d-%b-%Y",
+        "%d-%B-%Y",
         "%Y-%m-%d",
         "%d/%m/%y",
     ]
@@ -173,6 +178,11 @@ def _parse_arrival_date(value):
             )
         except ValueError:
             continue
+
+    print(
+        "Unable to parse arrival date:",
+        repr(value)
+    )
 
     return None
 

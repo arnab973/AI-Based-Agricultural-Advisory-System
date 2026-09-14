@@ -210,195 +210,342 @@ export default function MarketPricePage() {
   }, []);
 
   async function loadStates(): Promise<void> {
-    try {
-      setLoadingStates(true);
-      setError("");
+  try {
+    setLoadingStates(true);
+    setError("");
 
-      const response = await fetch(
-        `${API_URL}/market/states`,
+    const response = await fetch(
+      `${API_URL}/market/states`,
+      {
+        cache: "no-store",
+      },
+    );
+
+    if (!response.ok) {
+      throw new Error(
+        `Failed to load states: ${response.status}`,
       );
-
-      if (!response.ok) {
-        throw new Error("Failed to load states");
-      }
-
-      const data: StatesResponse = await response.json();
-
-      setStates(data.states ?? []);
-    } catch (err) {
-      console.error("State error:", err);
-
-      setError(
-        "Unable to load states. Make sure backend is running.",
-      );
-    } finally {
-      setLoadingStates(false);
     }
+
+    const data = await response.json();
+
+    console.log("Market states API response:", data);
+
+    const stateList: string[] = Array.isArray(data)
+      ? data
+      : Array.isArray(data?.states)
+        ? data.states
+        : [];
+
+    console.log("States loaded:", stateList);
+
+    setStates(stateList);
+  } catch (err) {
+    console.error("State error:", err);
+
+    setStates([]);
+
+    setError(
+      "Unable to load states. Make sure backend is running.",
+    );
+  } finally {
+    setLoadingStates(false);
   }
+}
 
   /* =========================================================
      STATE CHANGE
   ========================================================= */
 
   async function handleStateChange(
-    state: string,
-  ): Promise<void> {
-    setSelectedState(state);
+  state: string,
+): Promise<void> {
+  console.log("Selected state:", state);
 
-    setSelectedDistrict("");
-    setSelectedMarket("");
-    setSelectedCommodity("");
+  setSelectedState(state);
+
+  setSelectedDistrict("");
+  setSelectedMarket("");
+  setSelectedCommodity("");
+
+  setDistricts([]);
+  setMarkets([]);
+  setCommodities([]);
+
+  setPriceData(null);
+  setError("");
+
+  if (!state) {
+    return;
+  }
+
+  try {
+    setLoadingDistricts(true);
+
+    const params = new URLSearchParams();
+    params.set("state", state);
+
+    const url = `${API_URL}/market/districts?${params.toString()}`;
+
+    console.log("District API URL:", url);
+
+    const response = await fetch(url, {
+      cache: "no-store",
+    });
+
+    console.log(
+      "District API status:",
+      response.status,
+    );
+
+    if (!response.ok) {
+      throw new Error(
+        `Failed to load districts: ${response.status}`,
+      );
+    }
+
+    const data = await response.json();
+
+    console.log(
+      "District API response:",
+      data,
+    );
+
+    const districtList: string[] =
+      Array.isArray(data)
+        ? data
+        : Array.isArray(data?.districts)
+          ? data.districts
+          : [];
+
+    console.log(
+      "Districts loaded:",
+      districtList,
+    );
+
+    setDistricts(districtList);
+
+    if (districtList.length === 0) {
+      setError(
+        "No districts found for the selected state.",
+      );
+    }
+  } catch (err) {
+    console.error(
+      "District error:",
+      err,
+    );
 
     setDistricts([]);
-    setMarkets([]);
-    setCommodities([]);
 
-    setPriceData(null);
-    setError("");
-
-    if (!state) {
-      return;
-    }
-
-    try {
-      setLoadingDistricts(true);
-
-      const params = new URLSearchParams({
-        state,
-      });
-
-      const response = await fetch(
-        `${API_URL}/market/districts?${params.toString()}`,
-      );
-
-      if (!response.ok) {
-        throw new Error("Failed to load districts");
-      }
-
-      const data: DistrictsResponse =
-        await response.json();
-
-      setDistricts(data.districts ?? []);
-    } catch (err) {
-      console.error("District error:", err);
-
-      setError(
-        "Unable to load districts for this state.",
-      );
-    } finally {
-      setLoadingDistricts(false);
-    }
+    setError(
+      "Unable to load districts for this state.",
+    );
+  } finally {
+    setLoadingDistricts(false);
   }
+}
+   
 
   /* =========================================================
      DISTRICT CHANGE
   ========================================================= */
 
   async function handleDistrictChange(
-    district: string,
-  ): Promise<void> {
-    setSelectedDistrict(district);
+  district: string,
+): Promise<void> {
+  console.log("Selected district:", district);
+  console.log("Selected state:", selectedState);
 
-    setSelectedMarket("");
-    setSelectedCommodity("");
+  setSelectedDistrict(district);
+
+  setSelectedMarket("");
+  setSelectedCommodity("");
+
+  setMarkets([]);
+  setCommodities([]);
+
+  setPriceData(null);
+  setError("");
+
+  if (!district || !selectedState) {
+    return;
+  }
+
+  try {
+    setLoadingMarkets(true);
+
+    const params = new URLSearchParams();
+    params.set("state", selectedState);
+    params.set("district", district);
+
+    const url = `${API_URL}/market/markets?${params.toString()}`;
+
+    console.log("Market API URL:", url);
+
+    const response = await fetch(url, {
+      cache: "no-store",
+    });
+
+    console.log(
+      "Market API status:",
+      response.status,
+    );
+
+    if (!response.ok) {
+      throw new Error(
+        `Failed to load markets: ${response.status}`,
+      );
+    }
+
+    const data = await response.json();
+
+    console.log(
+      "Market API response:",
+      data,
+    );
+
+    const marketList: string[] =
+      Array.isArray(data)
+        ? data
+        : Array.isArray(data?.markets)
+          ? data.markets
+          : [];
+
+    console.log(
+      "Markets loaded:",
+      marketList,
+    );
+
+    setMarkets(marketList);
+
+    if (marketList.length === 0) {
+      setError(
+        "No markets found for the selected district.",
+      );
+    }
+  } catch (err) {
+    console.error(
+      "Market error:",
+      err,
+    );
 
     setMarkets([]);
-    setCommodities([]);
 
-    setPriceData(null);
-    setError("");
-
-    if (!district || !selectedState) {
-      return;
-    }
-
-    try {
-      setLoadingMarkets(true);
-
-      const params = new URLSearchParams({
-        state: selectedState,
-        district,
-      });
-
-      const response = await fetch(
-        `${API_URL}/market/markets?${params.toString()}`,
-      );
-
-      if (!response.ok) {
-        throw new Error("Failed to load markets");
-      }
-
-      const data: MarketsResponse =
-        await response.json();
-
-      setMarkets(data.markets ?? []);
-    } catch (err) {
-      console.error("Market error:", err);
-
-      setError(
-        "Unable to load markets for this district.",
-      );
-    } finally {
-      setLoadingMarkets(false);
-    }
+    setError(
+      "Unable to load markets for this district.",
+    );
+  } finally {
+    setLoadingMarkets(false);
   }
+}
 
   /* =========================================================
-     MARKET CHANGE
-  ========================================================= */
+   MARKET CHANGE
+========================================================= */
 
-  async function handleMarketChange(
-    market: string,
-  ): Promise<void> {
-    setSelectedMarket(market);
+async function handleMarketChange(
+  market: string,
+): Promise<void> {
+  console.log("=================================");
+  console.log("Selected Market:", market);
+  console.log("Selected State:", selectedState);
+  console.log("Selected District:", selectedDistrict);
+  console.log("=================================");
 
-    setSelectedCommodity("");
+  setSelectedMarket(market);
+  setSelectedCommodity("");
+  setCommodities([]);
+  setPriceData(null);
+  setError("");
+
+  if (!market || !selectedState || !selectedDistrict) {
+    console.log("Commodity loading skipped:", {
+      market,
+      selectedState,
+      selectedDistrict,
+    });
+    return;
+  }
+
+  try {
+    setLoadingCommodities(true);
+
+    const params = new URLSearchParams();
+    params.set("state", selectedState);
+    params.set("district", selectedDistrict);
+    params.set("market", market);
+
+    const url = `${API_URL}/market/commodities?${params.toString()}`;
+
+    console.log("Commodity API URL:", url);
+
+    const response = await fetch(url, {
+      method: "GET",
+      cache: "no-store",
+    });
+
+    console.log("Commodity API status:", response.status);
+
+    if (!response.ok) {
+      throw new Error(
+        `Failed to load commodities: ${response.status}`,
+      );
+    }
+
+    const data = await response.json();
+
+    console.log("Commodity API response:", data);
+    console.log("Raw commodities:", data?.commodities);
+
+    let commodityList: string[] = [];
+
+    if (Array.isArray(data)) {
+      commodityList = data;
+    } else if (Array.isArray(data?.commodities)) {
+      commodityList = data.commodities;
+    }
+
+    // Remove empty values + duplicates + sort alphabetically
+    commodityList = Array.from(
+      new Set(
+        commodityList
+          .filter(
+            (item): item is string =>
+              typeof item === "string" &&
+              item.trim().length > 0,
+          )
+          .map((item) => item.trim()),
+      ),
+    ).sort((a, b) => a.localeCompare(b));
+
+    console.log(
+      "Final commodities loaded:",
+      commodityList.length,
+      commodityList,
+    );
+
+    setCommodities(commodityList);
+
+    if (commodityList.length === 0) {
+      setError(
+        "No commodities found for this market.",
+      );
+    }
+  } catch (err) {
+    console.error("Commodity error:", err);
+
     setCommodities([]);
 
-    setPriceData(null);
-    setError("");
-
-    if (
-      !market ||
-      !selectedState ||
-      !selectedDistrict
-    ) {
-      return;
-    }
-
-    try {
-      setLoadingCommodities(true);
-
-      const params = new URLSearchParams({
-        state: selectedState,
-        district: selectedDistrict,
-        market,
-      });
-
-      const response = await fetch(
-        `${API_URL}/market/commodities?${params.toString()}`,
-      );
-
-      if (!response.ok) {
-        throw new Error(
-          "Failed to load commodities",
-        );
-      }
-
-      const data: CommoditiesResponse =
-        await response.json();
-
-      setCommodities(data.commodities ?? []);
-    } catch (err) {
-      console.error("Commodity error:", err);
-
-      setError(
-        "Unable to load commodities for this market.",
-      );
-    } finally {
-      setLoadingCommodities(false);
-    }
+    setError(
+      err instanceof Error
+        ? err.message
+        : "Unable to load commodities for this market.",
+    );
+  } finally {
+    setLoadingCommodities(false);
   }
+}
 
   /* =========================================================
      COMMODITY CHANGE
