@@ -1289,144 +1289,115 @@ def get_commodities(
     district: Optional[str] = None,
     market: Optional[str] = None
 ):
-    """
-    Get commodities from Agmarknet 2.0.
-
-    Uses the already-loaded /v1/daily-price-arrival/filters
-    response instead of the old data.gov.in commodity lookup.
-
-    The existing frontend/backend response format remains:
-        list[str]
-    """
+    """Get commodities actually available in the selected market for today."""
+    headers = {
+        "Accept": "application/json, text/plain, */*",
+        "Content-Type": "application/json",
+        "Origin": "https://agmarknet.gov.in",
+        "Referer": "https://agmarknet.gov.in/",
+        "User-Agent": "Mozilla/5.0",
+    }
 
     try:
+        print("\n========== AGMARKNET 2.0 MARKET COMMODITIES ==========")
+        print("State:", state)
+        print("District:", district)
+        print("Market:", market)
+
+        if not state or not market:
+            return []
+
         filter_data = _get_agmarknet_filters()
+        market_data = filter_data.get("market_data") or []
 
-        commodity_data = (
-            filter_data.get("cmdt_data")
-            or []
-        )
+        state_id = _find_state_id(filter_data, state)
+        print("Agmarknet state_id:", state_id)
+        if not state_id:
+            return []
 
-        requested_state = _normalize_state(state) if state else ""
-        requested_district = (
-            _normalize_district(requested_state, district)
-            if requested_state and district
-            else _clean(district)
-        )
-        requested_market = _clean(market)
+        district_id = None
+        if district:
+            district_id = _find_district_id(
+                filter_data, state_id, state, district
+            )
+        print("Agmarknet district_id:", district_id)
 
-        normalized_state = (
-            _normalize(requested_state)
-            if requested_state
-            else ""
+        market_id = None
+        normalized_market = _normalize(market)
+
+        for item in market_data:
+            if not isinstance(item, dict):
+                continue
+            item_name = _clean(
+                item.get("mkt_name")
+                or item.get("market_name")
+                or item.get("name")
+            )
+            item_state_id = _clean(item.get("state_id") or item.get("stateId"))
+            item_district_id = _clean(item.get("district_id") or item.get("districtId"))
+
+            if (
+                _normalize(item_name) == normalized_market
+                and item_state_id == _clean(state_id)
+                and (not district_id or item_district_id == _clean(district_id))
+            ):
+                market_id = item.get("id") or item.get("market_id")
+                break
+
+        print("Agmarknet market_id:", market_id)
+        if not market_id:
+            print("Market ID not found:", market)
+            return []
+
+        url = f"{AGMARKNET_V2_BASE_URL}/prices-and-arrivals/market-report/daily"
+        report_date = datetime.now().strftime("%Y-%m-%d")
+        payload = {
+            "date": report_date,
+            "marketIds": [int(market_id)],
+            "stateIds": [int(state_id)],
+        }
+
+        print("Agmarknet commodity report URL:", url)
+        print("Agmarknet commodity report payload:", payload)
+
+        response = requests.post(
+            url, headers=headers, json=payload, timeout=(15, 45)
         )
-        normalized_district = (
-            _normalize(requested_district)
-            if requested_district
-            else ""
-        )
-        normalized_market = (
-            _normalize(requested_market)
-            if requested_market
-            else ""
-        )
+        print("Agmarknet commodity report status:", response.status_code)
+        response.raise_for_status()
+        data = response.json()
 
         commodities = []
+        states = data.get("states") if isinstance(data, dict) else []
 
-        for item in commodity_data:
-
-            if isinstance(item, dict):
-
-                commodity = _clean(
-                    item.get("cmdt_name")
-                    or item.get("commodity_name")
-                    or item.get("Commodity")
-                    or item.get("name")
-                    or item.get("commodity")
-                )
-
-                item_state = _clean(
-                    item.get("state_name")
-                    or item.get("state")
-                    or item.get("State")
-                )
-
-                item_district = _clean(
-                    item.get("district_name")
-                    or item.get("district")
-                    or item.get("District")
-                )
-
-                item_market = _clean(
-                    item.get("mkt_name")
-                    or item.get("market_name")
-                    or item.get("market")
-                    or item.get("Market")
-                )
-
-            else:
-                commodity = _clean(item)
-                item_state = ""
-                item_district = ""
-                item_market = ""
-
-            if not commodity:
+        for state_item in states or []:
+            if not isinstance(state_item, dict):
                 continue
-
-            # -------------------------------------------------
-            # LOCATION FILTER
-            #
-            # Some Agmarknet 2.0 deployments return cmdt_data
-            # as a global commodity list without location fields.
-            # In that case, keep the commodity instead of
-            # incorrectly returning an empty list.
-            # -------------------------------------------------
-
-            if normalized_state and item_state:
-                if _normalize(item_state) != normalized_state:
+            for market_item in state_item.get("markets") or []:
+                if not isinstance(market_item, dict):
                     continue
-
-            if normalized_district and item_district:
-                if _normalize(item_district) != normalized_district:
+                response_market_id = market_item.get("marketId")
+                if response_market_id is not None and str(response_market_id) != str(market_id):
                     continue
+                for commodity_item in market_item.get("commodities") or []:
+                    if not isinstance(commodity_item, dict):
+                        continue
+                    name = _clean(commodity_item.get("commodityName"))
+                    if name:
+                        commodities.append(name)
 
-            if normalized_market and item_market:
-                if _normalize(item_market) != normalized_market:
-                    continue
-
-            commodities.append(commodity)
-
-        commodities = sorted(
-            set(commodities),
-            key=lambda value: value.lower()
-        )
-
-        print(
-            "Commodities found:",
-            len(commodities),
-            "| State:",
-            requested_state,
-            "| District:",
-            requested_district,
-            "| Market:",
-            requested_market
-        )
-
+        commodities = sorted(set(commodities), key=lambda value: value.lower())
+        print("Market commodities found:", len(commodities), "| State:", state, "| District:", district, "| Market:", market)
+        print("Commodities:", commodities)
         return commodities
 
+    except requests.RequestException as error:
+        print("Agmarknet commodity request failed:", repr(error))
+        return []
     except Exception as error:
-
-        print(
-            "Commodity lookup failed:",
-            repr(error)
-        )
-
+        print("Commodity lookup failed:", repr(error))
         return []
 
-
-# =========================================================
-# MARKET PRICE - AGMARKNET 2.0
-# =========================================================
 
 def get_market_prices(
     state: str,
@@ -1434,13 +1405,7 @@ def get_market_prices(
     district: Optional[str] = None,
     market: Optional[str] = None
 ):
-    """
-    Fetch latest market price data from Agmarknet 2.0.
-
-    Current Agmarknet 2.0 report endpoint:
-        POST /prices-and-arrivals/market-report/daily
-    """
-
+    """Fetch today's market price data from Agmarknet 2.0."""
     headers = {
         "Accept": "application/json, text/plain, */*",
         "Content-Type": "application/json",
@@ -1456,128 +1421,54 @@ def get_market_prices(
         print("Market:", market)
         print("Commodity:", commodity)
 
-        # -------------------------------------------------
-        # GET FILTER DATA
-        # -------------------------------------------------
-
         filter_data = _get_agmarknet_filters()
+        market_data = filter_data.get("market_data") or []
 
-        market_data = (
-            filter_data.get("market_data")
-            or []
-        )
-
-        commodity_data = (
-            filter_data.get("cmdt_data")
-            or []
-        )
-
-        # -------------------------------------------------
-        # FIND STATE ID
-        # -------------------------------------------------
-
-        state_id = _find_state_id(
-            filter_data,
-            state
-        )
-
+        state_id = _find_state_id(filter_data, state)
         print("Agmarknet state_id:", state_id)
-
         if not state_id:
-            print("State ID not found.")
-            return {
-                "count": 0,
-                "records": []
-            }
-
-        # -------------------------------------------------
-        # FIND DISTRICT ID
-        # -------------------------------------------------
+            return {"count": 0, "records": []}
 
         district_id = None
-
         if district:
             district_id = _find_district_id(
-                filter_data,
-                state,
-                district,
-                state_id
+                filter_data, state_id, state, district
             )
-
-        print(
-            "Agmarknet district_id:",
-            district_id
-        )
-
-        # -------------------------------------------------
-        # FIND MARKET ID
-        # -------------------------------------------------
+        print("Agmarknet district_id:", district_id)
 
         market_id = None
+        normalized_market = _normalize(market) if market else ""
 
-        if market:
-            normalized_market = _normalize(
-                market
+        for item in market_data:
+            if not isinstance(item, dict):
+                continue
+            item_name = _clean(
+                item.get("mkt_name")
+                or item.get("market_name")
+                or item.get("name")
             )
+            item_state_id = _clean(item.get("state_id") or item.get("stateId"))
+            item_district_id = _clean(item.get("district_id") or item.get("districtId"))
 
-            for item in market_data:
+            if (
+                _normalize(item_name) == normalized_market
+                and item_state_id == _clean(state_id)
+                and (not district_id or item_district_id == _clean(district_id))
+            ):
+                market_id = item.get("id") or item.get("market_id")
+                break
 
-                item_name = _clean(
-                    item.get("mkt_name")
-                    or item.get("market_name")
-                    or item.get("name")
-                )
-
-                item_state_id = _clean(
-                    item.get("state_id")
-                )
-
-                item_district_id = _clean(
-                    item.get("district_id")
-                )
-
-                if (
-                    _normalize(item_name)
-                    == normalized_market
-                    and item_state_id
-                    == _clean(state_id)
-                    and (
-                        not district_id
-                        or item_district_id
-                        == _clean(district_id)
-                    )
-                ):
-                    market_id = item.get("id")
-                    break
-
-        print(
-            "Agmarknet market_id:",
-            market_id
-        )
-
+        print("Agmarknet market_id:", market_id)
         if not market_id:
-            print(
-                "Market ID not found:",
-                market
-            )
+            return {"count": 0, "records": []}
 
-            return {
-                "count": 0,
-                "records": []
-            }
-
-        # -------------------------------------------------
-        # FIND COMMODITY ID
-        # -------------------------------------------------
-
+        commodity_data = filter_data.get("cmdt_data") or []
+        normalized_commodity = _normalize(commodity)
         commodity_id = None
 
-        normalized_commodity = _normalize(
-            commodity
-        )
-
         for item in commodity_data:
-
+            if not isinstance(item, dict):
+                continue
             item_name = _clean(
                 item.get("cmdt_name")
                 or item.get("commodity_name")
@@ -1585,11 +1476,7 @@ def get_market_prices(
                 or item.get("name")
                 or item.get("commodity")
             )
-
-            if (
-                _normalize(item_name)
-                == normalized_commodity
-            ):
+            if _normalize(item_name) == normalized_commodity:
                 commodity_id = (
                     item.get("id")
                     or item.get("cmdt_id")
@@ -1597,208 +1484,94 @@ def get_market_prices(
                 )
                 break
 
-        print(
-            "Agmarknet commodity_id:",
-            commodity_id
-        )
-
+        print("Agmarknet commodity_id:", commodity_id)
         if not commodity_id:
-            print(
-                "Commodity ID not found:",
-                commodity
-            )
+            print("Commodity ID not found:", commodity)
+            return {"count": 0, "records": []}
 
-            return {
-                "count": 0,
-                "records": []
-            }
-
-        # -------------------------------------------------
-        # DAILY REPORT
-        # -------------------------------------------------
-
-        url = (
-            f"{AGMARKNET_V2_BASE_URL}"
-            "/prices-and-arrivals/market-report/daily"
-        )
-
-        # Agmarknet report expects IDs.
-        # Date is kept as today's date.
-        report_date = datetime.now().strftime(
-            "%Y-%m-%d"
-        )
-
+        url = f"{AGMARKNET_V2_BASE_URL}/prices-and-arrivals/market-report/daily"
+        report_date = datetime.now().strftime("%Y-%m-%d")
         payload = {
             "date": report_date,
-            "marketIds": [
-                int(market_id)
-            ],
-            "stateIds": [
-                int(state_id)
-            ],
+            "marketIds": [int(market_id)],
+            "stateIds": [int(state_id)],
         }
 
-        print(
-            "Agmarknet daily report URL:",
-            url
-        )
-
-        print(
-            "Agmarknet daily report payload:",
-            payload
-        )
+        print("Agmarknet daily report URL:", url)
+        print("Agmarknet daily report payload:", payload)
 
         response = requests.post(
-            url,
-            headers=headers,
-            json=payload,
-            timeout=(15, 45)
+            url, headers=headers, json=payload, timeout=(15, 45)
         )
-
-        print(
-            "Agmarknet daily report status:",
-            response.status_code
-        )
-
+        print("Agmarknet daily report status:", response.status_code)
         response.raise_for_status()
-
         data = response.json()
 
-        print(
-            "Agmarknet daily report response:"
-        )
-        print(data)
-
-        # -------------------------------------------------
-        # EXTRACT RECORDS
-        # -------------------------------------------------
-
         records = []
+        states = data.get("states") if isinstance(data, dict) else []
 
-        if isinstance(data, dict):
-
-            # Common response possibilities
-            for key in [
-                "data",
-                "records",
-                "results",
-                "marketData",
-                "market_data"
-            ]:
-
-                value = data.get(key)
-
-                if isinstance(value, list):
-                    records = value
-                    break
-
-                if isinstance(value, dict):
-
-                    for nested_key in [
-                        "records",
-                        "data",
-                        "results",
-                        "rows"
-                    ]:
-
-                        nested = value.get(
-                            nested_key
-                        )
-
-                        if isinstance(
-                            nested,
-                            list
-                        ):
-                            records = nested
-                            break
-
-                    if records:
-                        break
-
-        elif isinstance(data, list):
-            records = data
-
-        print(
-            "Raw records found:",
-            len(records)
-        )
-
-        # -------------------------------------------------
-        # FILTER COMMODITY
-        # -------------------------------------------------
-
-        filtered_records = []
-
-        for record in records:
-
-            if not isinstance(
-                record,
-                dict
-            ):
+        for state_item in states or []:
+            if not isinstance(state_item, dict):
                 continue
-
-            record_commodity = _clean(
-                record.get("Commodity")
-                or record.get("commodity")
-                or record.get("cmdt_name")
-                or record.get("commodity_name")
-            )
-
-            if record_commodity:
-
-                if (
-                    _normalize(record_commodity)
-                    != normalized_commodity
-                ):
+            for market_item in state_item.get("markets") or []:
+                if not isinstance(market_item, dict):
+                    continue
+                response_market_id = market_item.get("marketId")
+                if response_market_id is not None and str(response_market_id) != str(market_id):
                     continue
 
-            cleaned = _clean_price_record(
-                record
-            )
+                for commodity_item in market_item.get("commodities") or []:
+                    if not isinstance(commodity_item, dict):
+                        continue
+                    response_commodity_name = _clean(commodity_item.get("commodityName"))
+                    response_commodity_id = commodity_item.get("commodityId")
 
-            filtered_records.append(
-                cleaned
-            )
+                    if response_commodity_name and _normalize(response_commodity_name) != normalized_commodity:
+                        continue
+                    if response_commodity_id is not None and commodity_id is not None and str(response_commodity_id) != str(commodity_id):
+                        continue
 
-        print(
-            "Commodity filtered records:",
-            len(filtered_records)
-        )
+                    for row in commodity_item.get("data") or []:
+                        if not isinstance(row, dict):
+                            continue
+                        records.append({
+                            "State": state,
+                            "District": district or "",
+                            "Market": _clean(row.get("marketCenter")) or market or "",
+                            "Commodity": response_commodity_name or commodity,
+                            "Commodity_Code": response_commodity_id or commodity_id,
+                            "Variety": _clean(row.get("variety")),
+                            "Grade": _clean(row.get("grade")),
+                            "Arrival_Date": report_date,
+                            "Min_Price": _clean_price(row.get("minimumPrice")),
+                            "Max_Price": _clean_price(row.get("maximumPrice")),
+                            "Modal_Price": _clean_price(row.get("modalPrice")),
+                            "Unit": _clean(row.get("unitOfPrice")),
+                            "Arrivals": _clean_price(row.get("arrivals")),
+                            "Arrival_Unit": _clean(row.get("unitOfArrivals")),
+                        })
+
+        print("Raw records found:", len(records))
+
+        filtered_records = [
+            _clean_price_record(record)
+            for record in records
+        ]
+
+        print("Commodity filtered records:", len(filtered_records))
 
         return {
-            "count": len(
-                filtered_records
-            ),
-            "records": filtered_records
+            "count": len(filtered_records),
+            "records": filtered_records,
         }
 
     except requests.RequestException as error:
-
-        print(
-            "Agmarknet 2.0 market request failed:",
-            repr(error)
-        )
-
-        return {
-            "count": 0,
-            "records": []
-        }
-
+        print("Agmarknet 2.0 market request failed:", repr(error))
+        return {"count": 0, "records": []}
     except Exception as error:
+        print("Market price lookup failed:", repr(error))
+        return {"count": 0, "records": []}
 
-        print(
-            "Market price lookup failed:",
-            repr(error)
-        )
-
-        return {
-            "count": 0,
-            "records": []
-        }
-
-# =========================================================
-# FETCH MARKET PRICE
-# =========================================================
 
 def fetch_market_price(
     state: str,
