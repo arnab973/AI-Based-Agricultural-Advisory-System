@@ -1290,57 +1290,126 @@ def get_commodities(
     market: Optional[str] = None
 ):
     """
-    Existing commodity lookup.
+    Get commodities from Agmarknet 2.0.
 
-    Kept compatible with the current frontend/backend.
+    Uses the already-loaded /v1/daily-price-arrival/filters
+    response instead of the old data.gov.in commodity lookup.
+
+    The existing frontend/backend response format remains:
+        list[str]
     """
 
-    filters = {}
-
-    if state:
-        filters["filters[State]"] = state
-
-    if district:
-        filters["filters[District]"] = district
-
-    if market:
-        filters["filters[Market]"] = market
-
-    fields = (
-        "State,District,Market,"
-        "Commodity,Commodity_Code"
-    )
-
     try:
+        filter_data = _get_agmarknet_filters()
 
-        data = _call_agmarknet(
-            filters=filters,
-            fields=fields,
-            limit=1000,
-            offset=0
+        commodity_data = (
+            filter_data.get("cmdt_data")
+            or []
         )
 
-        records = (
-            data.get("records")
-            or []
+        requested_state = _normalize_state(state) if state else ""
+        requested_district = (
+            _normalize_district(requested_state, district)
+            if requested_state and district
+            else _clean(district)
+        )
+        requested_market = _clean(market)
+
+        normalized_state = (
+            _normalize(requested_state)
+            if requested_state
+            else ""
+        )
+        normalized_district = (
+            _normalize(requested_district)
+            if requested_district
+            else ""
+        )
+        normalized_market = (
+            _normalize(requested_market)
+            if requested_market
+            else ""
         )
 
         commodities = []
 
-        for record in records:
+        for item in commodity_data:
 
-            commodity = _clean(
-                record.get("Commodity")
-            )
+            if isinstance(item, dict):
 
-            if commodity:
-                commodities.append(
-                    commodity
+                commodity = _clean(
+                    item.get("cmdt_name")
+                    or item.get("commodity_name")
+                    or item.get("Commodity")
+                    or item.get("name")
+                    or item.get("commodity")
                 )
+
+                item_state = _clean(
+                    item.get("state_name")
+                    or item.get("state")
+                    or item.get("State")
+                )
+
+                item_district = _clean(
+                    item.get("district_name")
+                    or item.get("district")
+                    or item.get("District")
+                )
+
+                item_market = _clean(
+                    item.get("mkt_name")
+                    or item.get("market_name")
+                    or item.get("market")
+                    or item.get("Market")
+                )
+
+            else:
+                commodity = _clean(item)
+                item_state = ""
+                item_district = ""
+                item_market = ""
+
+            if not commodity:
+                continue
+
+            # -------------------------------------------------
+            # LOCATION FILTER
+            #
+            # Some Agmarknet 2.0 deployments return cmdt_data
+            # as a global commodity list without location fields.
+            # In that case, keep the commodity instead of
+            # incorrectly returning an empty list.
+            # -------------------------------------------------
+
+            if normalized_state and item_state:
+                if _normalize(item_state) != normalized_state:
+                    continue
+
+            if normalized_district and item_district:
+                if _normalize(item_district) != normalized_district:
+                    continue
+
+            if normalized_market and item_market:
+                if _normalize(item_market) != normalized_market:
+                    continue
+
+            commodities.append(commodity)
 
         commodities = sorted(
             set(commodities),
             key=lambda value: value.lower()
+        )
+
+        print(
+            "Commodities found:",
+            len(commodities),
+            "| State:",
+            requested_state,
+            "| District:",
+            requested_district,
+            "| Market:",
+            requested_market
         )
 
         return commodities
