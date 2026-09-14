@@ -1591,6 +1591,9 @@ def fetch_market_price(
 ):
     """
     Return market price data with latest record.
+
+    If arrival date cannot be parsed, the first available
+    Agmarknet record is still returned instead of being discarded.
     """
 
     data = get_market_prices(
@@ -1600,13 +1603,15 @@ def fetch_market_price(
         market=market
     )
 
-    records = (
-        data.get("records")
-        or []
-    )
+    records = data.get("records") or []
+
+    print("========================================")
+    print("FETCH MARKET PRICE")
+    print("Records received:", len(records))
+    print("Records data:", records)
+    print("========================================")
 
     if not records:
-
         return {
             "count": 0,
             "latest": None,
@@ -1616,48 +1621,66 @@ def fetch_market_price(
     valid_records = []
 
     for record in records:
+        arrival_date = record.get("Arrival_Date")
 
-        arrival_date = record.get(
-            "Arrival_Date"
+        parsed_date = _parse_arrival_date(
+            arrival_date
         )
 
-        parsed_date = (
-            _parse_arrival_date(
-                arrival_date
+        print(
+            "Arrival date:",
+            repr(arrival_date),
+            "=> Parsed:",
+            parsed_date
+        )
+
+        if parsed_date is not None:
+            valid_records.append(
+                (
+                    parsed_date,
+                    record
+                )
             )
+
+    # ---------------------------------------------------------
+    # CASE 1:
+    # Date was successfully parsed
+    # ---------------------------------------------------------
+    if valid_records:
+        valid_records.sort(
+            key=lambda item: item[0],
+            reverse=True
         )
 
-        if parsed_date is None:
-            continue
+        sorted_records = [
+            record
+            for _, record in valid_records
+        ]
 
-        valid_records.append(
-            (
-                parsed_date,
-                record
-            )
-        )
+        latest = sorted_records[0]
 
-    # -----------------------------------------------------
-    # SORT NEWEST FIRST
-    # -----------------------------------------------------
+        return {
+            "count": len(records),
+            "latest": latest,
+            "records": sorted_records,
+        }
 
-    valid_records.sort(
-        key=lambda item: item[0],
-        reverse=True
+    # ---------------------------------------------------------
+    # CASE 2:
+    # Date could not be parsed
+    #
+    # Do NOT throw away the Agmarknet records.
+    # Return the first available record.
+    # ---------------------------------------------------------
+    print(
+        "WARNING: No valid arrival date found."
     )
-
-    latest = (
-        valid_records[0][1]
-        if valid_records
-        else records[0]
+    print(
+        "Returning first available Agmarknet record."
     )
 
     return {
         "count": len(records),
-        "latest": latest,
-        "records": [
-            record
-            for _, record
-            in valid_records
-        ],
+        "latest": records[0],
+        "records": records,
     }
